@@ -13,8 +13,8 @@ build-backend = "setuptools.build_meta"
 # -------------------------------
 [project]
 name = "verl"
-# We'll mark the version as "dynamic" because it's read from the file "verl/version/version" 
-# (PEP 621 calls this "dynamic version"). 
+# We'll mark the version as "dynamic" because it's read from the file "verl/version/version"
+# (PEP 621 calls this "dynamic version").
 # The actual version is specified in the [tool.setuptools.dynamic] section below.
 dynamic = ["version"]
 
@@ -43,10 +43,10 @@ dependencies = [
     "pybind11",
     "pylatexenc",
     "ray>=2.10",
-    "tensordict<0.6",
+    "tensordict==0.6.2",
     "torchdata",
     "transformers",
-    "vllm<=0.6.3",
+    #"vllm<=0.6.3",
     'wandb',
 ]
 
