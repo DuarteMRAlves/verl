@@ -24,6 +24,7 @@ from enum import Enum
 from pprint import pprint
 from typing import Type, Dict
 from copy import deepcopy
+from tqdm import tqdm
 
 import ray
 import numpy as np
@@ -165,71 +166,54 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
+def compute_response_mask(data: DataProto):
+    responses = data.batch['responses']
+    response_length = responses.size(1)
+    attention_mask = data.batch['attention_mask']
+    return attention_mask[:, -response_length:]
+
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1):
+    # Back-compatible with trainers that do not compute response mask in fit
+    if "response_mask" not in data.batch.keys():
+        data.batch['response_mask'] = compute_response_mask(data)
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == AdvantageEstimator.GAE:
         values = data.batch['values']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        token_level_rewards = data.batch['token_level_rewards']
-        advantages, returns = core_algos.compute_gae_advantage_return(token_level_rewards=token_level_rewards,
-                                                                      values=values,
-                                                                      eos_mask=response_mask,
-                                                                      gamma=gamma,
-                                                                      lam=lam)
+        advantages, returns = core_algos.compute_gae_advantage_return(
+            token_level_rewards=data.batch['token_level_rewards'],
+            values=data.batch['values'],
+            eos_mask=data.batch['response_mask'],
+            gamma=gamma,
+            lam=lam)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.GRPO:
-        token_level_rewards = data.batch['token_level_rewards']
-        index = data.non_tensor_batch['uid']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        advantages, returns = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_rewards,
-                                                                        eos_mask=response_mask,
-                                                                        index=index)
+        advantages, returns = core_algos.compute_grpo_outcome_advantage(
+            token_level_rewards=data.batch['token_level_rewards'],
+            eos_mask=data.batch['response_mask'],
+            index=data.non_tensor_batch['uid'])
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.REINFORCE_PLUS_PLUS:
-        token_level_rewards = data.batch['token_level_rewards']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
         advantages, returns = core_algos.compute_reinforce_plus_plus_outcome_advantage(
-            token_level_rewards=token_level_rewards, eos_mask=response_mask, gamma=gamma)
+            token_level_rewards=data.batch['token_level_rewards'], eos_mask=data.batch['response_mask'], gamma=gamma)
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.REMAX:
-        token_level_rewards = data.batch['token_level_rewards']
-        index = data.non_tensor_batch['uid']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-
-        reward_baselines = data.batch['reward_baselines']
-
-        advantages, returns = core_algos.compute_remax_outcome_advantage(token_level_rewards=token_level_rewards,
-                                                                         reward_baselines=reward_baselines,
-                                                                         eos_mask=response_mask)
+        advantages, returns = core_algos.compute_remax_outcome_advantage(
+            token_level_rewards=data.batch['token_level_rewards'],
+            reward_baselines=data.batch['reward_baselines'],
+            eos_mask=data.batch['response_mask'])
 
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.RLOO:
-        token_level_rewards = data.batch['token_level_rewards']
-        index = data.non_tensor_batch['uid']
-        responses = data.batch['responses']
-        response_length = responses.size(-1)
-        attention_mask = data.batch['attention_mask']
-        response_mask = attention_mask[:, -response_length:]
-        advantages, returns = core_algos.compute_rloo_outcome_advantage(token_level_rewards=token_level_rewards,
-                                                                        eos_mask=response_mask,
-                                                                        index=index)
+        advantages, returns = core_algos.compute_rloo_outcome_advantage(
+            token_level_rewards=data.batch['token_level_rewards'],
+            eos_mask=data.batch['response_mask'],
+            index=data.non_tensor_batch['uid'])
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     else:
@@ -659,14 +643,27 @@ class RayPPOTrainer(object):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir,
                                                 f'global_step_{self.global_steps}')
+
+        print(f'local_global_step_folder: {local_global_step_folder}')
         actor_local_path = os.path.join(local_global_step_folder, 'actor')
 
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
             self.config.trainer.default_hdfs_dir, f'global_step_{self.global_steps}', 'actor')
+
+        remove_previous_ckpt_in_save = self.config.trainer.get('remove_previous_ckpt_in_save', False)
+        if remove_previous_ckpt_in_save:
+            print(
+                'Warning: remove_previous_ckpt_in_save is deprecated, set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead'
+            )
+        max_actor_ckpt_to_keep = self.config.trainer.get('max_actor_ckpt_to_keep',
+                                                         None) if not remove_previous_ckpt_in_save else 1
+        max_critic_ckpt_to_keep = self.config.trainer.get('max_critic_ckpt_to_keep',
+                                                          None) if not remove_previous_ckpt_in_save else 1
+
         self.actor_rollout_wg.save_checkpoint(actor_local_path,
                                               actor_remote_path,
                                               self.global_steps,
-                                              remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save)
+                                              max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, 'critic')
@@ -675,7 +672,7 @@ class RayPPOTrainer(object):
             self.critic_wg.save_checkpoint(critic_local_path,
                                            critic_remote_path,
                                            self.global_steps,
-                                           remove_previous_ckpt=self.config.trainer.remove_previous_ckpt_in_save)
+                                           max_ckpt_to_keep=max_critic_ckpt_to_keep)
 
         # save dataloader
         dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
@@ -736,7 +733,7 @@ class RayPPOTrainer(object):
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
         if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path)
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
@@ -785,6 +782,9 @@ class RayPPOTrainer(object):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
                 return
+
+        # add tqdm
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
@@ -838,6 +838,7 @@ class RayPPOTrainer(object):
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    batch.batch['response_mask'] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -934,6 +935,8 @@ class RayPPOTrainer(object):
 
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
+                    progress_bar.close()
                     return
 
+                progress_bar.update(1)
                 self.global_steps += 1
