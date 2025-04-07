@@ -20,6 +20,10 @@ import os
 import ray
 import hydra
 
+from functools import partial
+
+from collections.abc import Mapping
+
 
 def get_custom_reward_fn(config):
     import importlib.util, os
@@ -46,7 +50,14 @@ def get_custom_reward_fn(config):
 
     print(f"using customized reward function '{function_name}' from '{file_path}'")
 
-    return getattr(module, function_name)
+    custom_reward_fn = getattr(module, function_name)
+
+    remaining_kwargs = reward_fn_config.get("kwargs", {})
+
+    if not isinstance(remaining_kwargs, Mapping):
+        raise TypeError(f"kwargs must be a mapping, got {type(remaining_kwargs)}")
+
+    return partial(custom_reward_fn, **remaining_kwargs)
 
 
 @hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)

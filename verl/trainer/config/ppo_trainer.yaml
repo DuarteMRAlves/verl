@@ -165,6 +165,7 @@ reward_model:
 custom_reward_function:
   path: null
   name: compute_score
+  kwargs: {} # custom static arguments to be passed to the reward function
 
 algorithm:
   gamma: 1.0
