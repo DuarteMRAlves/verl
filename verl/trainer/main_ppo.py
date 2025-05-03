@@ -151,6 +151,11 @@ class TaskRunner:
                 raise NotImplementedError
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
+        
+        if config.comet_model.enable:
+            from verl.workers.fsdp_workers import COMETWorker
+            role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
+            mapping[Role.COMETMetric] = global_pool_id
 
         reward_manager_name = config.reward_model.get("reward_manager", "naive")
         if reward_manager_name == 'naive':
@@ -159,6 +164,9 @@ class TaskRunner:
         elif reward_manager_name == 'prime':
             from verl.workers.reward_manager import PrimeRewardManager
             reward_manager_cls = PrimeRewardManager
+        elif reward_manager_name == 'comet':
+            from verl.workers.reward_manager import COMETRewardManager
+            reward_manager_cls = COMETRewardManager
         else:
             raise NotImplementedError
 

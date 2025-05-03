@@ -1,4 +1,6 @@
-# Copyright 2024 PRIME team and/or its affiliates
+# Copied from https://github.com/fzp0424/MT-R1-Zero/blob/main/verl/workers/comet/__init__.py
+
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
-from .comet import COMETRewardManager
+from .base import BaseCOMETModel
+from .dp_comet import DataParallelCOMET
+
+__all__ = ["BaseCOMETModel", "DataParallelCOMET"]

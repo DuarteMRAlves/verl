@@ -167,6 +167,15 @@ custom_reward_function:
   name: compute_score
   kwargs: {} # custom static arguments to be passed to the reward function
 
+comet:
+  enable: False
+  micro_batch_size: 64
+  answer_extractor: none
+  model:
+    input_tokenizer: ${actor_rollout_ref.model.path}
+    download_path: ~/models/Unbabel-wmt22-comet-da
+    external_lib: ${actor_rollout_ref.model.external_lib}
+
 algorithm:
   gamma: 1.0
   lam: 1.0

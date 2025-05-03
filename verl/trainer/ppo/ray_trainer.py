@@ -58,6 +58,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    COMETMetric = 7
 
 
 class AdvantageEstimator(str, Enum):
@@ -263,6 +264,7 @@ class RayPPOTrainer(object):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_comet = Role.COMETMetric in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
 
@@ -609,6 +611,12 @@ class RayPPOTrainer(object):
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
 
+         # create comet is needed
+        if self.use_comet:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.COMETMetric)
+            comet_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.COMETMetric], config=self.config.comet)
+            self.resource_pool_to_cls[resource_pool]['comet'] = comet_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
@@ -634,6 +642,10 @@ class RayPPOTrainer(object):
         if self.use_rm:
             self.rm_wg = all_wg['rm']
             self.rm_wg.init_model()
+
+        if self.use_comet:
+            self.comet_wg = all_wg['comet']
+            self.comet_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
@@ -871,12 +883,16 @@ class RayPPOTrainer(object):
                         # the results from reward model and rule-based results.
                         if self.use_rm:
                             # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
+                            comet_scores = self.rm_wg.compute_rm_score(batch)
+                            batch = batch.union(comet_scores)
+                        
+                        if self.use_comet:
+                            comet_scores = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(comet_scores)
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
-                        batch.batch['token_level_scores'] = reward_tensor
+                        comet_scores = self.reward_fn(batch)
+                        batch.batch['token_level_scores'] = comet_scores
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
