@@ -1202,22 +1202,28 @@ class COMETWorker(Worker):
         from comet import load_from_checkpoint
         from verl.utils.answer_extraction import get_answer_extractor
 
-        tokenizer_path = copy_to_local(self.config.input_tokenizer)
+        tokenizer_path = copy_to_local(self.config.model.input_tokenizer)
         self.tokenizer = hf_tokenizer(tokenizer_path)
 
-        self.comet_module = load_from_checkpoint(self.config.download_path)
+        # We need to reload hparams because we pre-download the encoder model
+        # and patch the hparams
+        self.comet_module = load_from_checkpoint(self.config.model.download_path, reload_hparams=True)
         self.answer_extractor = get_answer_extractor(self.config.answer_extractor)
-        self.comet = DataParallelCOMET(config=self.config, comet_module=self.comet_module, tokenizer = self.tokenizer)
+        self.comet = DataParallelCOMET(
+            config=self.config,
+            comet_module=self.comet_module,
+            tokenizer=self.tokenizer,
+            answer_extractor=self.answer_extractor,
+        )
 
         torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_comet_rm(self, data: DataProto):
 
-        data = data.to('cuda')
-        micro_batch_size = self.config.forward_micro_batch_size
+        data = data.to(torch.cuda.current_device())
+        micro_batch_size = self.config.micro_batch_size
         data.meta_info['micro_batch_size'] = micro_batch_size
-        data.meta_info['use_dynamic_bsz'] = self.config.use_dynamic_bsz
         # perform forward computation
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -1239,7 +1245,7 @@ class COMETWorker(Worker):
         response_length = data.batch['responses'].shape[-1]
         eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
         token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
-        token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores
+        token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores.to(token_level_scores.device)
 
         # select the response part
         token_level_scores = token_level_scores[:, -response_length:]

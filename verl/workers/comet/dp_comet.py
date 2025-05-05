@@ -41,7 +41,7 @@ class DataParallelCOMET(BaseCOMETModel):
         self.answer_extractor = answer_extractor
 
     def compute_comet_rm(self, data: DataProto) -> torch.Tensor:
-        reward_tensor = torch.zeros((len(data.batch['responses']), 1), dtype=torch.float32)
+        reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
         triplets = []
         scored_idxs = []
         for i in range(len(data)):
@@ -62,7 +62,7 @@ class DataParallelCOMET(BaseCOMETModel):
                 continue
             
             # Assumes the translation is the full answer.
-            mt = answer_extraction.answer_text
+            mt = answer_extraction.answer
 
             src_text = data_item.non_tensor_batch['reward_model']['src']
             tgt_text = data_item.non_tensor_batch['reward_model']['tgt']
@@ -71,7 +71,7 @@ class DataParallelCOMET(BaseCOMETModel):
             scored_idxs.append(i)
 
         batch_size = self.config.micro_batch_size
-        comet_output = self.comet_model.predict(triplets, batch_size=batch_size, gpus=1)
+        comet_output = self.comet_model.predict(triplets, batch_size=batch_size, gpus=1, progress_bar=False)
         scores = list(comet_output.scores)
 
         for score, score_idx in zip(scores, scored_idxs):

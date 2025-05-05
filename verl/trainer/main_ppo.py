@@ -152,7 +152,7 @@ class TaskRunner:
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
         
-        if config.comet_model.enable:
+        if config.comet.enable:
             from verl.workers.fsdp_workers import COMETWorker
             role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
             mapping[Role.COMETMetric] = global_pool_id

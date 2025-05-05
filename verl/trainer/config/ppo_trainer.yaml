@@ -170,10 +170,10 @@ custom_reward_function:
 comet:
   enable: False
   micro_batch_size: 64
-  answer_extractor: none
+  answer_extractor: full
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}
-    download_path: ~/models/Unbabel-wmt22-comet-da
+    download_path: ~/models/Unbabel-wmt22-comet-da/checkpoints/model.ckpt
     external_lib: ${actor_rollout_ref.model.external_lib}
 
 algorithm:
@@ -186,6 +186,7 @@ algorithm:
     kl_coef: 0.001
 
 trainer:
+  enable_validation: True
   balance_batch: True
   total_epochs: 30
   total_training_steps: null
