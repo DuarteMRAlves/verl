@@ -62,6 +62,7 @@ class Role(Enum):
     ActorRolloutRef = 6
     COMETMetric = 7
     AnswerExtractor = 8
+    RewardFunction = 9
 
 
 class AdvantageEstimator(str, Enum):
@@ -269,6 +270,7 @@ class RayPPOTrainer(object):
         self.use_answer_extractor = Role.AnswerExtractor in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.use_comet = Role.COMETMetric in role_worker_mapping
+        self.use_rf = Role.RewardFunction in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
         self.do_val = self.config.trainer.enable_validation
@@ -396,6 +398,10 @@ class RayPPOTrainer(object):
         if self.use_comet:
             assert config.answer_extractor.enable, \
                 "COMET metric requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
+            
+        if self.use_rf:
+            assert config.answer_extractor.enable, \
+                "Reward function requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -640,6 +646,12 @@ class RayPPOTrainer(object):
             comet_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.COMETMetric], config=self.config.comet)
             self.resource_pool_to_cls[resource_pool]['comet'] = comet_cls
 
+        # create reward function if needed
+        if self.use_rf:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardFunction)
+            rf_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardFunction], config=self.config.reward_function)
+            self.resource_pool_to_cls[resource_pool]['rf'] = rf_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
@@ -673,6 +685,10 @@ class RayPPOTrainer(object):
         if self.use_comet:
             self.comet_wg = all_wg['comet']
             self.comet_wg.init_model()
+
+        if self.use_rf:
+            self.rf_wg = all_wg['rf']
+            self.rf_wg.init()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
@@ -921,6 +937,10 @@ class RayPPOTrainer(object):
                         
                         if self.use_comet:
                             scores = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(scores)
+
+                        if self.use_rf:
+                            scores = self.rf_wg.compute_rf_scores(batch)
                             batch = batch.union(scores)
 
                         # we combine with rule-based rm

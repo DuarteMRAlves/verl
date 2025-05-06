@@ -32,6 +32,12 @@ def force_think_extractor(output: str) -> AnswerExtractionResult:
     
     thinking = match.group(1).strip()
     answer = match.group(2).strip()
+
+    # if number of tokens in answer is larger than in thinking, return incorrect reward
+    # TODO: is this the best way to do this?
+    if len(answer.split()) > len(thinking.split()):
+        return AnswerExtractionResult.failed()
+
     return AnswerExtractionResult.successful(thinking=thinking, answer=answer)
 
 

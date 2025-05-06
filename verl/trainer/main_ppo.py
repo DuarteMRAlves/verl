@@ -26,6 +26,14 @@ from collections.abc import Mapping
 
 
 def get_custom_reward_fn(config):
+    # !!! Warning !!!
+    #
+    # This function is the default verl way to load a custom reward function but we will
+    # ignore it when the reward manager is MultipleRewardManager.
+    #
+    # In that case, the custom reward function will be executed as a worker and then
+    # the reward manager will combine the reward scores.
+    
     import importlib.util, os
 
     reward_fn_config = config.get("custom_reward_function") or {}
@@ -87,6 +95,8 @@ def run_ppo(config) -> None:
 class TaskRunner:
 
     def run(self, config):
+        import torch
+        torch.set_float32_matmul_precision("high")
         from verl.utils.fs import copy_to_local
         # print initial config
         from pprint import pprint
@@ -162,6 +172,11 @@ class TaskRunner:
             role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
             mapping[Role.COMETMetric] = global_pool_id
 
+        if config.reward_function.enable:
+            from verl.workers.fsdp_workers import RewardFunctionWorker
+            role_worker_mapping[Role.RewardFunction] = ray.remote(RewardFunctionWorker)
+            mapping[Role.RewardFunction] = global_pool_id
+
         reward_manager_name = config.reward_manager.get("type", "naive")
         if reward_manager_name == 'naive':
             from verl.workers.reward_manager import NaiveRewardManager
@@ -175,12 +190,12 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        compute_score = get_custom_reward_fn(config)
         if reward_manager_name == 'multiple':
             kwargs = config.reward_manager.multiple_kwargs
             reward_fn = reward_manager_cls(**kwargs)
             val_reward_fn = None
         else:
+            compute_score = get_custom_reward_fn(config)
             reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
 
             # Note that we always use function-based RM for validation

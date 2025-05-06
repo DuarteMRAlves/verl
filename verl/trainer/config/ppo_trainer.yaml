@@ -173,10 +173,13 @@ answer_extractor:
   type: full
   input_tokenizer: ${actor_rollout_ref.model.path}
 
-custom_reward_function:
-  path: null
-  name: compute_score
-  kwargs: {} # custom static arguments to be passed to the reward function
+reward_function:
+  enable: False
+  custom:
+    enable: False
+    path: ""
+    name: compute_score
+    kwargs: {} # custom static arguments to be passed to the reward function
 
 comet:
   enable: False

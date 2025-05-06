@@ -1228,6 +1228,39 @@ class COMETWorker(Worker):
         return output
 
 
+class RewardFunctionWorker(Worker):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init(self):
+        from verl.workers.reward_function import SequentialRewardFunction
+        from verl.utils.reward_score import _default_compute_score
+        from verl.utils.reward_score.load import load_compute_score_fn
+
+        if self.config.custom.enable:
+            compute_score = load_compute_score_fn(
+                file_path=self.config.custom.path,
+                function_name=self.config.custom.name,
+                **self.config.custom.kwargs,
+            )
+        else:
+            compute_score = _default_compute_score
+        self.reward_function = SequentialRewardFunction(self.config, compute_score)
+
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_rf_scores(self, data: DataProto):
+        data = data.to(torch.cuda.current_device())
+        scores = self.reward_function.compute_scores(data)
+        token_level_scores = _expand_scores_to_token_level(data, scores)
+        output = DataProto.from_dict(tensors={'rf_scores': token_level_scores})
+        output = output.to('cpu')
+        return output
+
+
 class AnswerExtractorWorker(Worker):
 
     def __init__(self, config):
