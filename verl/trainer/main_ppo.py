@@ -136,6 +136,11 @@ class TaskRunner:
             Role.RefPolicy: global_pool_id,
         }
 
+        if config.answer_extractor.enable:
+            from verl.workers.fsdp_workers import AnswerExtractorWorker
+            role_worker_mapping[Role.AnswerExtractor] = ray.remote(AnswerExtractorWorker)
+            mapping[Role.AnswerExtractor] = global_pool_id
+
         # we should adopt a multi-source reward function here
         # - for rule-based rm, we directly call a reward score
         # - for model-based rm, we call a model
@@ -157,24 +162,29 @@ class TaskRunner:
             role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
             mapping[Role.COMETMetric] = global_pool_id
 
-        reward_manager_name = config.reward_model.get("reward_manager", "naive")
+        reward_manager_name = config.reward_manager.get("type", "naive")
         if reward_manager_name == 'naive':
             from verl.workers.reward_manager import NaiveRewardManager
             reward_manager_cls = NaiveRewardManager
         elif reward_manager_name == 'prime':
             from verl.workers.reward_manager import PrimeRewardManager
             reward_manager_cls = PrimeRewardManager
-        elif reward_manager_name == 'comet':
-            from verl.workers.reward_manager import COMETRewardManager
-            reward_manager_cls = COMETRewardManager
+        elif reward_manager_name == 'multiple':
+            from verl.workers.reward_manager import MultipleRewardManager
+            reward_manager_cls = MultipleRewardManager
         else:
             raise NotImplementedError
 
         compute_score = get_custom_reward_fn(config)
-        reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
+        if reward_manager_name == 'multiple':
+            kwargs = config.reward_manager.multiple_kwargs
+            reward_fn = reward_manager_cls(**kwargs)
+            val_reward_fn = None
+        else:
+            reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
 
-        # Note that we always use function-based RM for validation
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score)
+            # Note that we always use function-based RM for validation
+            val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score)
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

@@ -44,6 +44,8 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from typing import Callable
+
 WorkerType = Type[Worker]
 
 
@@ -59,6 +61,7 @@ class Role(Enum):
     RewardModel = 5
     ActorRolloutRef = 6
     COMETMetric = 7
+    AnswerExtractor = 8
 
 
 class AdvantageEstimator(str, Enum):
@@ -263,6 +266,7 @@ class RayPPOTrainer(object):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_answer_extractor = Role.AnswerExtractor in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.use_comet = Role.COMETMetric in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -387,6 +391,11 @@ class RayPPOTrainer(object):
         if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
             assert config.actor_rollout_ref.rollout.temperature > 0, \
                 "validation gen temperature should be greater than 0 when enabling do_sample"
+
+        # Check comet
+        if self.use_comet:
+            assert config.answer_extractor.enable, \
+                "COMET metric requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -609,6 +618,15 @@ class RayPPOTrainer(object):
                                                   role='ref')
             self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
 
+        # create answer extractor if needed
+        if self.use_answer_extractor:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AnswerExtractor)
+            ae_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.AnswerExtractor],
+                config=self.config.answer_extractor,
+            )
+            self.resource_pool_to_cls[resource_pool]['answer_extractor'] = ae_cls
+
         # create a reward model if reward_fn is None
         if self.use_rm:
             # we create a RM here
@@ -643,6 +661,10 @@ class RayPPOTrainer(object):
         if self.use_reference_policy:
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
+
+        if self.use_answer_extractor:
+            self.answer_extractor_wg = all_wg['answer_extractor']
+            self.answer_extractor_wg.init()
 
         if self.use_rm:
             self.rm_wg = all_wg['rm']
@@ -882,22 +904,28 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # Extract answers
+                    if self.use_answer_extractor:
+                        with _timer('answer_extract', timing_raw):
+                            ae_output = self.answer_extractor_wg.extract_answers(batch)
+                            batch = batch.union(ae_output)
+
                     with _timer('adv', timing_raw):
                         # compute scores. Support both model and function-based.
                         # We first compute the scores using reward model. Then, we call reward_fn to combine
                         # the results from reward model and rule-based results.
                         if self.use_rm:
                             # we first compute reward model score
-                            comet_scores = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(comet_scores)
+                            scores = self.rm_wg.compute_rm_score(batch)
+                            batch = batch.union(scores)
                         
                         if self.use_comet:
-                            comet_scores = self.comet_wg.compute_comet_rm(batch)
-                            batch = batch.union(comet_scores)
+                            scores = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(scores)
 
                         # we combine with rule-based rm
-                        comet_scores = self.reward_fn(batch)
-                        batch.batch['token_level_scores'] = comet_scores
+                        scores = self.reward_fn(batch)
+                        batch.batch['token_level_scores'] = scores
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):

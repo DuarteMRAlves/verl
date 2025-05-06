@@ -14,4 +14,4 @@
 
 from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
-from .comet import COMETRewardManager
+from .multiple import MultipleRewardManager

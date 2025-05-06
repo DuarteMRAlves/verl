@@ -20,6 +20,7 @@ import os
 import warnings
 import psutil
 
+import numpy as np
 import torch
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
@@ -1200,21 +1201,11 @@ class COMETWorker(Worker):
 
         from verl.workers.comet import DataParallelCOMET
         from comet import load_from_checkpoint
-        from verl.utils.answer_extraction import get_answer_extractor
-
-        tokenizer_path = copy_to_local(self.config.model.input_tokenizer)
-        self.tokenizer = hf_tokenizer(tokenizer_path)
 
         # We need to reload hparams because we pre-download the encoder model
         # and patch the hparams
-        self.comet_module = load_from_checkpoint(self.config.model.download_path, reload_hparams=True)
-        self.answer_extractor = get_answer_extractor(self.config.answer_extractor)
-        self.comet = DataParallelCOMET(
-            config=self.config,
-            comet_module=self.comet_module,
-            tokenizer=self.tokenizer,
-            answer_extractor=self.answer_extractor,
-        )
+        self.comet_model = load_from_checkpoint(self.config.model.download_path, reload_hparams=True)
+        self.comet = DataParallelCOMET(config=self.config, comet_module=self.comet_model)
 
         torch.cuda.empty_cache()
 
@@ -1228,15 +1219,64 @@ class COMETWorker(Worker):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             comet_scores = self.comet.compute_comet_rm(data=data)
-            token_level_scores = self._expand_to_token_level(data, comet_scores)
+            token_level_scores = _expand_scores_to_token_level(data, comet_scores)
             output = DataProto.from_dict(tensors={'comet_rm': token_level_scores})
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
         output = output.to('cpu')
 
         torch.cuda.empty_cache()
         return output
+
+
+class AnswerExtractorWorker(Worker):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init(self):
+        from verl.utils.answer_extraction import get_answer_extractor
+
+        tokenizer_path = copy_to_local(self.config.input_tokenizer)
+        self.tokenizer = hf_tokenizer(tokenizer_path)
+
+        self.answer_extractor = get_answer_extractor(self.config.type)
     
-    def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def extract_answers(self, data: DataProto):
+        data = data.to(torch.cuda.current_device())
+
+        extractions = []
+        extraction_success = []
+        for i in range(len(data)):
+            data_item = data[i]
+            prompt_ids = data_item.batch['prompts']
+
+            prompt_length = prompt_ids.shape[-1]
+
+            response_ids = data_item.batch['responses']
+            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            answer_extraction = self.answer_extractor(response_str)
+            extractions.append(answer_extraction)
+            extraction_success.append(answer_extraction.success)
+
+        extraction_mask = torch.tensor(extraction_success, dtype=torch.bool)
+        token_level_rewards = _expand_scores_to_token_level(data, extraction_mask)
+        output = DataProto.from_dict(
+            tensors={'format_reward': token_level_rewards},
+            non_tensors={"answer_extraction": extractions},
+        )
+        
+        output = output.to('cpu')
+        return output
+
+
+def _expand_scores_to_token_level(data: DataProto, scores: torch.Tensor):
         """Copied from RewardModelWorker"""
         batch_size = data.batch.batch_size[0]
         # expand as token_level_reward

@@ -28,36 +28,20 @@ __all__ = ['DataParallelCOMET']
 
 class DataParallelCOMET(BaseCOMETModel):
 
-    def __init__(
-        self,
-        config,
-        comet_module,
-        tokenizer,
-        answer_extractor,
-    ):
+    def __init__(self, config, comet_module):
         super().__init__(config=config)
         self.comet_model = comet_module
-        self.tokenizer = tokenizer
-        self.answer_extractor = answer_extractor
 
     def compute_comet_rm(self, data: DataProto) -> torch.Tensor:
-        reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
         triplets = []
         scored_idxs = []
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
-            prompt_ids = data_item.batch['prompts']
 
-            prompt_length = prompt_ids.shape[-1]
+            if data_item.non_tensor_batch["reward_model"]["style"] != "comet":
+                continue
 
-            response_ids = data_item.batch['responses']
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-
-            # decode
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            answer_extraction = self.answer_extractor(response_str)
-
+            answer_extraction = data_item.non_tensor_batch["answer_extraction"]
             if not answer_extraction.success:
                 continue
             
@@ -74,7 +58,8 @@ class DataParallelCOMET(BaseCOMETModel):
         comet_output = self.comet_model.predict(triplets, batch_size=batch_size, gpus=1, progress_bar=False)
         scores = list(comet_output.scores)
 
+        reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
         for score, score_idx in zip(scores, scored_idxs):
             reward_tensor[score_idx] = score
-
+        
         return reward_tensor
