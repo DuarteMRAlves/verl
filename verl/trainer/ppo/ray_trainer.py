@@ -44,6 +44,8 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from typing import Callable
+
 WorkerType = Type[Worker]
 
 
@@ -58,6 +60,9 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    COMETMetric = 7
+    AnswerExtractor = 8
+    RewardFunction = 9
 
 
 class AdvantageEstimator(str, Enum):
@@ -262,9 +267,15 @@ class RayPPOTrainer(object):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_answer_extractor = Role.AnswerExtractor in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_comet = Role.COMETMetric in role_worker_mapping
+        self.use_rf = Role.RewardFunction in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self.do_val = len(self.config.data.val_files) > 0
+        if not self.do_val:
+            print('No validation files found, skipping validation.', flush=True)
 
         # define KL control
         if self.use_reference_policy:
@@ -383,6 +394,15 @@ class RayPPOTrainer(object):
             assert config.actor_rollout_ref.rollout.temperature > 0, \
                 "validation gen temperature should be greater than 0 when enabling do_sample"
 
+        # Check comet
+        if self.use_comet:
+            assert config.answer_extractor.enable, \
+                "COMET metric requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
+            
+        if self.use_rf:
+            assert config.answer_extractor.enable, \
+                "Reward function requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self):
@@ -415,33 +435,35 @@ class RayPPOTrainer(object):
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
 
-        self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
-                                       tokenizer=self.tokenizer,
-                                       processor=self.processor,
-                                       prompt_key=self.config.data.prompt_key,
-                                       image_key=self.config.data.get('image_key', 'images'),
-                                       max_prompt_length=self.config.data.max_prompt_length,
-                                       filter_prompts=True,
-                                       return_raw_chat=self.config.data.get('return_raw_chat', False),
-                                       truncation=self.config.data.get('truncation', 'error'),
-                                       filter_overlong_prompts=self.config.data.filter_overlong_prompts)
-        assert self.val_dataset.truncation == self.config.data.get(
-            'truncation', 'error'
-        ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            # Validation datasets are sent to inference engines as a whole batch,
-            # which will schedule the memory themselves.
-            batch_size=len(self.val_dataset),
-            num_workers=8,
-            shuffle=False,
-            drop_last=False,
-            collate_fn=collate_fn)
+        if self.do_val:
+            self.val_dataset = RLHFDataset(parquet_files=self.config.data.val_files,
+                                        tokenizer=self.tokenizer,
+                                        processor=self.processor,
+                                        prompt_key=self.config.data.prompt_key,
+                                        image_key=self.config.data.get('image_key', 'images'),
+                                        max_prompt_length=self.config.data.max_prompt_length,
+                                        filter_prompts=True,
+                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
+                                        truncation=self.config.data.get('truncation', 'error'),
+                                        filter_overlong_prompts=self.config.data.filter_overlong_prompts)
+            assert self.val_dataset.truncation == self.config.data.get(
+                'truncation', 'error'
+            ), f'dataset truncation {self.val_dataset.truncation} must be the same as config {self.config.data.get("truncation", "error")}'
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                # Validation datasets are sent to inference engines as a whole batch,
+                # which will schedule the memory themselves.
+                batch_size=len(self.val_dataset),
+                num_workers=8,
+                shuffle=False,
+                drop_last=False,
+                collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1
-        assert len(
-            self.val_dataloader
-        ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
+        if self.do_val:
+            assert len(
+                self.val_dataloader
+            ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
 
         print(f'Size of train dataloader: {len(self.train_dataloader)}')
 
@@ -500,8 +522,8 @@ class RayPPOTrainer(object):
                                            interleave=True)
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
-                return {}
+            #if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
+            #    return {}
 
             # Store original inputs
             input_ids = test_batch.batch['input_ids']
@@ -542,6 +564,23 @@ class RayPPOTrainer(object):
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
+
+            if self.use_answer_extractor:
+                ae_output = self.answer_extractor_wg.extract_answers(test_batch)
+                test_batch = test_batch.union(ae_output)
+
+            if self.use_rm:
+                # we first compute reward model score
+                scores = self.rm_wg.compute_rm_score(test_batch)
+                test_batch = test_batch.union(scores)
+            
+            if self.use_comet:
+                comet_output = self.comet_wg.compute_comet_rm(test_batch)
+                test_batch = test_batch.union(comet_output)
+
+            if self.use_rf:
+                rf_output = self.rf_wg.compute_rf_scores(test_batch)
+                test_batch = test_batch.union(rf_output)
 
             # evaluate using reward_function
             reward_tensor = self.val_reward_fn(test_batch)
@@ -602,12 +641,33 @@ class RayPPOTrainer(object):
                                                   role='ref')
             self.resource_pool_to_cls[resource_pool]['ref'] = ref_policy_cls
 
+        # create answer extractor if needed
+        if self.use_answer_extractor:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AnswerExtractor)
+            ae_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.AnswerExtractor],
+                config=self.config.answer_extractor,
+            )
+            self.resource_pool_to_cls[resource_pool]['answer_extractor'] = ae_cls
+
         # create a reward model if reward_fn is None
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]['rm'] = rm_cls
+
+         # create comet is needed
+        if self.use_comet:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.COMETMetric)
+            comet_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.COMETMetric], config=self.config.comet)
+            self.resource_pool_to_cls[resource_pool]['comet'] = comet_cls
+
+        # create reward function if needed
+        if self.use_rf:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardFunction)
+            rf_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardFunction], config=self.config.reward_function)
+            self.resource_pool_to_cls[resource_pool]['rf'] = rf_cls
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -631,9 +691,21 @@ class RayPPOTrainer(object):
             self.ref_policy_wg = all_wg['ref']
             self.ref_policy_wg.init_model()
 
+        if self.use_answer_extractor:
+            self.answer_extractor_wg = all_wg['answer_extractor']
+            self.answer_extractor_wg.init()
+
         if self.use_rm:
             self.rm_wg = all_wg['rm']
             self.rm_wg.init_model()
+
+        if self.use_comet:
+            self.comet_wg = all_wg['comet']
+            self.comet_wg.init_model()
+
+        if self.use_rf:
+            self.rf_wg = all_wg['rf']
+            self.rf_wg.init()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
@@ -776,7 +848,7 @@ class RayPPOTrainer(object):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
+        if self.do_val and self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
             val_metrics = self._validate()
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=self.global_steps)
@@ -865,18 +937,34 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # Extract answers
+                    if self.use_answer_extractor:
+                        with _timer('answer_extract', timing_raw):
+                            ae_output = self.answer_extractor_wg.extract_answers(batch)
+                            batch = batch.union(ae_output)
+
                     with _timer('adv', timing_raw):
                         # compute scores. Support both model and function-based.
                         # We first compute the scores using reward model. Then, we call reward_fn to combine
                         # the results from reward model and rule-based results.
                         if self.use_rm:
                             # we first compute reward model score
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
+                            scores = self.rm_wg.compute_rm_score(batch)
+                            batch = batch.union(scores)
+                        
+                        if self.use_comet:
+                            comet_output = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(comet_output)
+                            metrics.update(comet_output.meta_info["comet_metrics"])
+
+                        if self.use_rf:
+                            rf_output = self.rf_wg.compute_rf_scores(batch)
+                            batch = batch.union(rf_output)
+                            metrics.update(rf_output.meta_info["rf_metrics"])
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
-                        batch.batch['token_level_scores'] = reward_tensor
+                        scores = self.reward_fn(batch)
+                        batch.batch['token_level_scores'] = scores
 
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
@@ -910,7 +998,7 @@ class RayPPOTrainer(object):
                         metrics.update(actor_output_metrics)
 
                     # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
+                    if self.do_val and self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
                         (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()

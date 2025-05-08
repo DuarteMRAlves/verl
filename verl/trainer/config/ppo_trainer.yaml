@@ -141,6 +141,13 @@ critic:
   checkpoint:
     contents: ['model', 'hf_model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
 
+reward_manager:
+  type: naive
+  multiple_kwargs:
+    format_weight: 0.0
+    reward_model_weight: 1.0
+    comet_weight: 1.0
+
 reward_model:
   enable: False
   strategy: fsdp
@@ -160,12 +167,26 @@ reward_model:
   ulysses_sequence_parallel_size: 1 # sp size
   use_dynamic_bsz: ${critic.use_dynamic_bsz}
   forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
-  reward_manager: naive
 
-custom_reward_function:
-  path: null
-  name: compute_score
-  kwargs: {} # custom static arguments to be passed to the reward function
+answer_extractor:
+  enable: True
+  type: full
+  input_tokenizer: ${actor_rollout_ref.model.path}
+
+reward_function:
+  enable: False
+  custom:
+    enable: False
+    path: ""
+    name: compute_score
+    kwargs: {} # custom static arguments to be passed to the reward function
+
+comet:
+  enable: False
+  micro_batch_size: 64
+  model:
+    download_path: ~/models/Unbabel-wmt22-comet-da/checkpoints/model.ckpt
+    external_lib: ${actor_rollout_ref.model.external_lib}
 
 algorithm:
   gamma: 1.0

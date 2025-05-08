@@ -20,6 +20,7 @@ import os
 import warnings
 import psutil
 
+import numpy as np
 import torch
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
@@ -1169,3 +1170,167 @@ class RewardModelWorker(Worker):
 
         output = output.to('cpu')
         return output
+
+
+class COMETWorker(Worker):
+
+    def __init__(self, config):
+        super().__init__()
+        import torch
+
+        torch.set_float32_matmul_precision('high')
+
+        import torch.distributed
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl")
+        self.config = config
+
+        # build device mesh for Ulysses Sequence Parallel
+        world_size = torch.distributed.get_world_size()
+        from torch.distributed.device_mesh import init_device_mesh
+        self.ulysses_device_mesh = None
+        self.ulysses_sequence_parallel_size = self.config.get('ulysses_sequence_parallel_size', 1)
+        dp = world_size // self.ulysses_sequence_parallel_size
+        if self.ulysses_sequence_parallel_size > 1:
+            self.ulysses_device_mesh = init_device_mesh('cuda',
+                                                        mesh_shape=(dp, self.ulysses_sequence_parallel_size),
+                                                        mesh_dim_names=['dp', 'sp'])
+
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        # This is used to import external_lib into the huggingface systems
+        import_external_libs(self.config.model.get('external_lib', None))
+
+        from verl.workers.comet import DataParallelCOMET
+        from comet import load_from_checkpoint
+
+        # We need to reload hparams because we pre-download the encoder model
+        # and patch the hparams
+        self.comet_model = load_from_checkpoint(self.config.model.download_path, reload_hparams=True)
+        self.comet = DataParallelCOMET(config=self.config, comet_module=self.comet_model)
+
+        torch.cuda.empty_cache()
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_comet_rm(self, data: DataProto):
+
+        data = data.to(torch.cuda.current_device())
+        micro_batch_size = self.config.micro_batch_size
+        data.meta_info['micro_batch_size'] = micro_batch_size
+        # perform forward computation
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            comet_scores, metrics = self.comet.compute_comet_rm(data=data)
+            token_level_scores = _expand_scores_to_token_level(data, comet_scores)
+            output = DataProto.from_dict(
+                tensors={'comet_rm': token_level_scores},
+                meta_info={'comet_metrics': metrics},
+            )
+            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+        output = output.to('cpu')
+
+        torch.cuda.empty_cache()
+        return output
+
+
+class RewardFunctionWorker(Worker):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init(self):
+        from verl.workers.reward_function import SequentialRewardFunction
+        from verl.utils.reward_score import _default_compute_score
+        from verl.utils.reward_score.load import load_compute_score_fn
+
+        if self.config.custom.enable:
+            compute_score = load_compute_score_fn(
+                file_path=self.config.custom.path,
+                function_name=self.config.custom.name,
+                **self.config.custom.kwargs,
+            )
+        else:
+            compute_score = _default_compute_score
+        self.reward_function = SequentialRewardFunction(self.config, compute_score)
+
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_rf_scores(self, data: DataProto):
+        data = data.to(torch.cuda.current_device())
+        scores, metrics = self.reward_function.compute_scores(data)
+        token_level_scores = _expand_scores_to_token_level(data, scores)
+        output = DataProto.from_dict(
+            tensors={'rf_scores': token_level_scores},
+            meta_info={'rf_metrics': metrics},
+        )
+        output = output.to('cpu')
+        return output
+
+
+class AnswerExtractorWorker(Worker):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init(self):
+        from verl.utils.answer_extraction import get_answer_extractor
+
+        tokenizer_path = copy_to_local(self.config.input_tokenizer)
+        self.tokenizer = hf_tokenizer(tokenizer_path)
+
+        self.answer_extractor = get_answer_extractor(self.config.type)
+    
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def extract_answers(self, data: DataProto):
+        data = data.to(torch.cuda.current_device())
+
+        extractions = []
+        extraction_success = []
+        for i in range(len(data)):
+            data_item = data[i]
+            prompt_ids = data_item.batch['prompts']
+
+            prompt_length = prompt_ids.shape[-1]
+
+            response_ids = data_item.batch['responses']
+            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+
+            # decode
+            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            answer_extraction = self.answer_extractor(response_str)
+            extractions.append(answer_extraction)
+            extraction_success.append(answer_extraction.success)
+
+        extraction_mask = torch.tensor(extraction_success, dtype=torch.bool)
+        token_level_rewards = _expand_scores_to_token_level(data, extraction_mask)
+        output = DataProto.from_dict(
+            tensors={'format_reward': token_level_rewards},
+            non_tensors={"answer_extraction": extractions},
+        )
+        
+        output = output.to('cpu')
+        return output
+
+
+def _expand_scores_to_token_level(data: DataProto, scores: torch.Tensor):
+        """Copied from RewardModelWorker"""
+        batch_size = data.batch.batch_size[0]
+        # expand as token_level_reward
+        attention_mask = data.batch['attention_mask']
+        position_ids = data.batch['position_ids']
+        response_length = data.batch['responses'].shape[-1]
+        eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
+        token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
+        token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores.to(token_level_scores.device)
+
+        # select the response part
+        token_level_scores = token_level_scores[:, -response_length:]
+
+        return token_level_scores

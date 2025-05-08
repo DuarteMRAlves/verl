@@ -26,6 +26,14 @@ from collections.abc import Mapping
 
 
 def get_custom_reward_fn(config):
+    # !!! Warning !!!
+    #
+    # This function is the default verl way to load a custom reward function but we will
+    # ignore it when the reward manager is MultipleRewardManager.
+    #
+    # In that case, the custom reward function will be executed as a worker and then
+    # the reward manager will combine the reward scores.
+    
     import importlib.util, os
 
     reward_fn_config = config.get("custom_reward_function") or {}
@@ -87,6 +95,8 @@ def run_ppo(config) -> None:
 class TaskRunner:
 
     def run(self, config):
+        import torch
+        torch.set_float32_matmul_precision("high")
         from verl.utils.fs import copy_to_local
         # print initial config
         from pprint import pprint
@@ -136,6 +146,11 @@ class TaskRunner:
             Role.RefPolicy: global_pool_id,
         }
 
+        if config.answer_extractor.enable:
+            from verl.workers.fsdp_workers import AnswerExtractorWorker
+            role_worker_mapping[Role.AnswerExtractor] = ray.remote(AnswerExtractorWorker)
+            mapping[Role.AnswerExtractor] = global_pool_id
+
         # we should adopt a multi-source reward function here
         # - for rule-based rm, we directly call a reward score
         # - for model-based rm, we call a model
@@ -151,23 +166,40 @@ class TaskRunner:
                 raise NotImplementedError
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
             mapping[Role.RewardModel] = global_pool_id
+        
+        if config.comet.enable:
+            from verl.workers.fsdp_workers import COMETWorker
+            role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
+            mapping[Role.COMETMetric] = global_pool_id
 
-        reward_manager_name = config.reward_model.get("reward_manager", "naive")
+        if config.reward_function.enable:
+            from verl.workers.fsdp_workers import RewardFunctionWorker
+            role_worker_mapping[Role.RewardFunction] = ray.remote(RewardFunctionWorker)
+            mapping[Role.RewardFunction] = global_pool_id
+
+        reward_manager_name = config.reward_manager.get("type", "naive")
         if reward_manager_name == 'naive':
             from verl.workers.reward_manager import NaiveRewardManager
             reward_manager_cls = NaiveRewardManager
         elif reward_manager_name == 'prime':
             from verl.workers.reward_manager import PrimeRewardManager
             reward_manager_cls = PrimeRewardManager
+        elif reward_manager_name == 'multiple':
+            from verl.workers.reward_manager import MultipleRewardManager
+            reward_manager_cls = MultipleRewardManager
         else:
             raise NotImplementedError
 
-        compute_score = get_custom_reward_fn(config)
-        reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, compute_score=compute_score)
+        if reward_manager_name == 'multiple':
+            reward_manager_kwargs = config.reward_manager.multiple_kwargs
+        else:
+            compute_score = get_custom_reward_fn(config)
+            reward_manager_kwargs = {"compute_score": compute_score}
+        
+        reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, **reward_manager_kwargs)
 
-        # Note that we always use function-based RM for validation
-        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, compute_score=compute_score)
-
+        val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=3, **reward_manager_kwargs)
+            
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         trainer = RayPPOTrainer(config=config,
