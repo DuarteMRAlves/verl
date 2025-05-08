@@ -273,7 +273,7 @@ class RayPPOTrainer(object):
         self.use_rf = Role.RewardFunction in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
-        self.do_val = self.config.trainer.enable_validation
+        self.do_val = len(self.config.data.val_files) > 0
         if not self.do_val:
             print('No validation files found, skipping validation.', flush=True)
 
@@ -522,8 +522,8 @@ class RayPPOTrainer(object):
                                            interleave=True)
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
-                return {}
+            #if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
+            #    return {}
 
             # Store original inputs
             input_ids = test_batch.batch['input_ids']
@@ -564,6 +564,23 @@ class RayPPOTrainer(object):
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
+
+            if self.use_answer_extractor:
+                ae_output = self.answer_extractor_wg.extract_answers(test_batch)
+                test_batch = test_batch.union(ae_output)
+
+            if self.use_rm:
+                # we first compute reward model score
+                scores = self.rm_wg.compute_rm_score(test_batch)
+                test_batch = test_batch.union(scores)
+            
+            if self.use_comet:
+                comet_output = self.comet_wg.compute_comet_rm(test_batch)
+                test_batch = test_batch.union(comet_output)
+
+            if self.use_rf:
+                rf_output = self.rf_wg.compute_rf_scores(test_batch)
+                test_batch = test_batch.union(rf_output)
 
             # evaluate using reward_function
             reward_tensor = self.val_reward_fn(test_batch)
@@ -936,12 +953,14 @@ class RayPPOTrainer(object):
                             batch = batch.union(scores)
                         
                         if self.use_comet:
-                            scores = self.comet_wg.compute_comet_rm(batch)
-                            batch = batch.union(scores)
+                            comet_output = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(comet_output)
+                            metrics.update(comet_output.meta_info["comet_metrics"])
 
                         if self.use_rf:
-                            scores = self.rf_wg.compute_rf_scores(batch)
-                            batch = batch.union(scores)
+                            rf_output = self.rf_wg.compute_rf_scores(batch)
+                            batch = batch.union(rf_output)
+                            metrics.update(rf_output.meta_info["rf_metrics"])
 
                         # we combine with rule-based rm
                         scores = self.reward_fn(batch)

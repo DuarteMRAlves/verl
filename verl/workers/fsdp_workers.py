@@ -1176,6 +1176,10 @@ class COMETWorker(Worker):
 
     def __init__(self, config):
         super().__init__()
+        import torch
+
+        torch.set_float32_matmul_precision('high')
+
         import torch.distributed
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(backend="nccl")
@@ -1218,9 +1222,12 @@ class COMETWorker(Worker):
         # perform forward computation
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
-            comet_scores = self.comet.compute_comet_rm(data=data)
+            comet_scores, metrics = self.comet.compute_comet_rm(data=data)
             token_level_scores = _expand_scores_to_token_level(data, comet_scores)
-            output = DataProto.from_dict(tensors={'comet_rm': token_level_scores})
+            output = DataProto.from_dict(
+                tensors={'comet_rm': token_level_scores},
+                meta_info={'comet_metrics': metrics},
+            )
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
         output = output.to('cpu')
 
@@ -1254,9 +1261,12 @@ class RewardFunctionWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rf_scores(self, data: DataProto):
         data = data.to(torch.cuda.current_device())
-        scores = self.reward_function.compute_scores(data)
+        scores, metrics = self.reward_function.compute_scores(data)
         token_level_scores = _expand_scores_to_token_level(data, scores)
-        output = DataProto.from_dict(tensors={'rf_scores': token_level_scores})
+        output = DataProto.from_dict(
+            tensors={'rf_scores': token_level_scores},
+            meta_info={'rf_metrics': metrics},
+        )
         output = output.to('cpu')
         return output
 

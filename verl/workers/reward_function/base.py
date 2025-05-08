@@ -11,7 +11,7 @@ class BaseRewardFunction(ABC):
         self.config = config
 
     @abstractmethod
-    def compute_scores(data: DataProto) -> torch.Tensor:
+    def compute_scores(data: DataProto) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Computing reward given input_ids.
 
         Args:
@@ -20,6 +20,6 @@ class BaseRewardFunction(ABC):
                 - attention_mask: [batch_size, sequence_length]
                 - position_ids: [batch_size, sequence_length]
 
-        Returns: scores for the input data.
+        Returns: scores for the input data and metrics to log.
         """
         pass

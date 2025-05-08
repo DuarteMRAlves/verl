@@ -17,6 +17,8 @@
 The base class for reward model
 """
 
+import torch
+
 from abc import ABC, abstractmethod
 
 from verl import DataProto
@@ -28,7 +30,7 @@ class BaseCOMETModel(ABC):
         self.config = config
 
     @abstractmethod
-    def compute_comet_rm(self, data: DataProto) -> DataProto:
+    def compute_comet_rm(self, data: DataProto) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Computing reward given input_ids. The transformers should output a tensor with shape
            [batch_size, sequence_length], and the value at [EOS] mask should be gathered.
 
@@ -38,10 +40,7 @@ class BaseCOMETModel(ABC):
                 - attention_mask: [batch_size, sequence_length]
                 - position_ids: [batch_size, sequence_length]
 
-        Returns: a data pass protocol containing "reward". Only the [EOS] position contains the reward.
-            Other position should have zero reward. Note that this may change in the future if we use
-            dense reward. So, we leave the interface for general case.
-            - reward: [batch_size, sequence_length].
+        Returns: comet scores for the input data and metrics to log.
 
         """
         pass

@@ -32,7 +32,7 @@ class DataParallelCOMET(BaseCOMETModel):
         super().__init__(config=config)
         self.comet_model = comet_module
 
-    def compute_comet_rm(self, data: DataProto) -> torch.Tensor:
+    def compute_comet_rm(self, data: DataProto) -> tuple[torch.Tensor, dict[str, float]]:
         triplets = []
         scored_idxs = []
         for i in range(len(data)):
@@ -54,12 +54,21 @@ class DataParallelCOMET(BaseCOMETModel):
             triplets.append({"src": src_text, "mt": mt, "ref": tgt_text})
             scored_idxs.append(i)
 
+        reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
+        if len(triplets) == 0:
+            return reward_tensor, {}
+
         batch_size = self.config.micro_batch_size
         comet_output = self.comet_model.predict(triplets, batch_size=batch_size, gpus=1, progress_bar=False)
         scores = list(comet_output.scores)
 
-        reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
         for score, score_idx in zip(scores, scored_idxs):
             reward_tensor[score_idx] = score
+
+        metrics = {
+            "comet/min": reward_tensor.min().item(),
+            "comet/max": reward_tensor.max().item(),
+            "comet/mean": reward_tensor.mean().item(),
+        }
         
-        return reward_tensor
+        return reward_tensor, metrics

@@ -9,7 +9,7 @@ class SequentialRewardFunction(BaseRewardFunction):
         super().__init__(config)
         self.compute_score = compute_score
 
-    def compute_scores(self, data: DataProto) -> torch.Tensor:
+    def compute_scores(self, data: DataProto) -> tuple[torch.Tensor, dict[str, float]]:
         scores = []
         scored_idxs = []
 
@@ -41,4 +41,10 @@ class SequentialRewardFunction(BaseRewardFunction):
         for score, score_idx in zip(scores, scored_idxs):
             reward_tensor[score_idx] = score
 
-        return reward_tensor
+        metrics = {
+            "reward_function/min": reward_tensor.min().item(),
+            "reward_function/max": reward_tensor.max().item(),
+            "reward_function/mean": reward_tensor.mean().item(),
+        }
+
+        return reward_tensor, metrics
