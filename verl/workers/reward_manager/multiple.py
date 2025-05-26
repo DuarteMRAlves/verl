@@ -7,7 +7,7 @@ class MultipleRewardManager:
     def __init__(self,
         tokenizer,
         num_examine: int,
-        format_weight: float = 0.0,
+        format_weight: float = 0.2,
         reward_model_weight: float = 1.0,
         comet_weight: float = 1.0,
         reward_function_weight: float = 1.0,
@@ -36,7 +36,7 @@ class MultipleRewardManager:
             weighted_scores.append(data.batch["rm_scores"] * self.reward_model_weight)
         if self.comet_weight != 0 and "comet_rm" in data.batch:
             weighted_scores.append(data.batch["comet_rm"] * self.comet_weight)
-        if self.reward_function_weight != 0 and "reward_function" in data.batch:
+        if self.reward_function_weight != 0 and "rf_scores" in data.batch:
             weighted_scores.append(data.batch["rf_scores"] * self.reward_function_weight)
 
         if len(weighted_scores) == 0:

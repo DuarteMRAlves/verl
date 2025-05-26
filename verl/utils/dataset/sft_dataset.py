@@ -94,6 +94,9 @@ class SFTDataset(Dataset):
             except Exception:
                 print(f'self.prompts={self.prompts}')
                 raise
+        if not self.prompt_dict_keys:
+            # if not indexing is done, still need to convert to series
+            self.prompts = self.prompts.iloc[:, 0]
         self.prompts = self.prompts.tolist()
         self.responses = self.dataframe[self.response_key]
         for key in self.response_dict_keys:
@@ -102,6 +105,9 @@ class SFTDataset(Dataset):
             except Exception:
                 print(f'self.responses={self.responses}')
                 raise
+        if not self.response_dict_keys:
+            # if not indexing is done, still need to convert to series
+            self.responses = self.responses.iloc[:, 0]
         self.responses = self.responses.tolist()
 
     def __len__(self):
