@@ -38,13 +38,15 @@ class SequentialRewardFunction(BaseRewardFunction):
             scored_idxs.append(i)
 
         reward_tensor = torch.zeros((len(data.batch['responses']),), dtype=torch.float32)
+        scored_idx_mask = torch.empty_like(reward_tensor, dtype=torch.bool)
         for score, score_idx in zip(scores, scored_idxs):
             reward_tensor[score_idx] = score
+            scored_idx_mask[score_idx] = True
 
         metrics = {
-            "reward_function/min": reward_tensor.min().item(),
-            "reward_function/max": reward_tensor.max().item(),
-            "reward_function/mean": reward_tensor.mean().item(),
+            "reward_function/min": reward_tensor[scored_idx_mask].min().item(),
+            "reward_function/max": reward_tensor[scored_idx_mask].max().item(),
+            "reward_function/mean": reward_tensor[scored_idx_mask].mean().item(),
         }
 
         return reward_tensor, metrics

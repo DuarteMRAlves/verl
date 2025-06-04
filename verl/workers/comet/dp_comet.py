@@ -62,13 +62,16 @@ class DataParallelCOMET(BaseCOMETModel):
         comet_output = self.comet_model.predict(triplets, batch_size=batch_size, gpus=1, progress_bar=False)
         scores = list(comet_output.scores)
 
+        scored_idx_mask = torch.empty_like(reward_tensor, dtype=torch.bool)
+        
         for score, score_idx in zip(scores, scored_idxs):
             reward_tensor[score_idx] = score
+            scored_idx_mask[score_idx] = True
 
         metrics = {
-            "comet/min": reward_tensor.min().item(),
-            "comet/max": reward_tensor.max().item(),
-            "comet/mean": reward_tensor.mean().item(),
+            "comet/min": reward_tensor[scored_idx_mask].min().item(),
+            "comet/max": reward_tensor[scored_idx_mask].max().item(),
+            "comet/mean": reward_tensor[scored_idx_mask].mean().item(),
         }
         
         return reward_tensor, metrics
