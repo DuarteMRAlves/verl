@@ -525,62 +525,63 @@ class RayPPOTrainer(object):
             #if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
             #    return {}
 
+            # pad to be divisible by dp_size
+            test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch, self.actor_rollout_wg.world_size)
+
             # Store original inputs
-            input_ids = test_batch.batch['input_ids']
+            input_ids = test_batch_padded.batch['input_ids']
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
 
-            if 'multi_modal_inputs' in test_batch.non_tensor_batch.keys():
-                test_gen_batch = test_batch.pop(
+            if 'multi_modal_inputs' in test_batch_padded.non_tensor_batch.keys():
+                test_gen_batch_padded = test_batch_padded.pop(
                     batch_keys=['input_ids', 'attention_mask', 'position_ids'],
                     non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
                 )
             else:
-                test_gen_batch = test_batch.pop(
+                test_gen_batch_padded = test_batch_padded.pop(
                     batch_keys=['input_ids', 'attention_mask', 'position_ids'],
                     non_tensor_batch_keys=['raw_prompt_ids'],
                 )
 
-            test_gen_batch.meta_info = {
+            test_gen_batch_padded.meta_info = {
                 'eos_token_id': self.tokenizer.eos_token_id,
                 'pad_token_id': self.tokenizer.pad_token_id,
                 'recompute_log_prob': False,
                 'do_sample': self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 'validate': True,
             }
-            print(f'test_gen_batch meta info: {test_gen_batch.meta_info}')
+            print(f'test_gen_batch meta info: {test_gen_batch_padded.meta_info}')
 
-            # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
             test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
 
-            # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
-            print('validation generation end')
-
             # Store generated outputs
-            output_ids = test_output_gen_batch.batch['responses']
+            output_ids = test_output_gen_batch_padded.batch['responses']
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
-            test_batch = test_batch.union(test_output_gen_batch)
+            test_batch_padded = test_batch_padded.union(test_output_gen_batch_padded)
 
             if self.use_answer_extractor:
-                ae_output = self.answer_extractor_wg.extract_answers(test_batch)
-                test_batch = test_batch.union(ae_output)
+                ae_output = self.answer_extractor_wg.extract_answers(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(ae_output)
 
             if self.use_rm:
                 # we first compute reward model score
-                scores = self.rm_wg.compute_rm_score(test_batch)
-                test_batch = test_batch.union(scores)
+                scores = self.rm_wg.compute_rm_score(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(scores)
             
             if self.use_comet:
-                comet_output = self.comet_wg.compute_comet_rm(test_batch)
-                test_batch = test_batch.union(comet_output)
+                comet_output = self.comet_wg.compute_comet_rm(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(comet_output)
 
             if self.use_rf:
-                rf_output = self.rf_wg.compute_rf_scores(test_batch)
-                test_batch = test_batch.union(rf_output)
+                rf_output = self.rf_wg.compute_rf_scores(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(rf_output)
+
+            # unpad
+            test_batch = unpad_dataproto(test_batch_padded, pad_size=pad_size)
+            print('validation generation end')
 
             # evaluate using reward_function
             reward_tensor = self.val_reward_fn(test_batch)
