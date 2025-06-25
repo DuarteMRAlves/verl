@@ -1,6 +1,7 @@
 set -x
 ENGINE=${1:-vllm}
-export VLLM_ATTENTION_BACKEND=XFORMERS
+# If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
+# export VLLM_ATTENTION_BACKEND=XFORMERS
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -34,13 +35,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=20 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.kl_ctrl.kl_coef=0.001 \
+    algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_grpo_example_geo3k' \
     trainer.experiment_name='qwen2_5_vl_7b_function_rm' \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.total_epochs=15 $@

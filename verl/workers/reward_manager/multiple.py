@@ -27,8 +27,9 @@ class MultipleRewardManager:
         ):
             raise ValueError("At least one reward weight must be non-zero.")
 
-    def __call__(self, data: DataProto):
+    def __call__(self, data: DataProto, return_dict: bool = False):
         weighted_scores = []
+        reward_extra_info = defaultdict(list)
 
         if self.format_weight != 0 and "format_reward" in data.batch:
             weighted_scores.append(data.batch["format_reward"] * self.format_weight)
@@ -52,7 +53,13 @@ class MultipleRewardManager:
         if self.num_examine > 0:
             self._print_data_sources(data, scores)
 
-        return scores
+        if return_dict:
+            return {
+                "reward_tensor": scores,
+                "reward_extra_info": reward_extra_info,
+            }
+        else:
+            return scores
     
 
     def _print_data_sources(self, data, scores):
