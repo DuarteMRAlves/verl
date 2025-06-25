@@ -33,6 +33,7 @@ lib64/
 parts/
 sdist/
 var/
+tmp/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -108,9 +109,6 @@ ENV/
 # Mac
 .DS_Store
 
-# output logs
-tests/e2e/toy_examples/deepspeed/synchronous/output.txt
-
 # vim
 *.swp
 
@@ -125,3 +123,4 @@ tests/e2e/toy_examples/deepspeed/synchronous/output.txt
 logs
 log
 outputs
+.history
