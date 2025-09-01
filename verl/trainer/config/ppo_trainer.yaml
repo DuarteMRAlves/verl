@@ -124,6 +124,27 @@ actor_rollout_ref:
     # The ranks that will be profiled. [] or [0,1,...]
     ranks: []
 
+
+answer_extractor:
+  enable: True
+  type: full
+  input_tokenizer: ${actor_rollout_ref.model.path}
+
+reward_function:
+  enable: False
+  custom:
+    enable: False
+    path: ""
+    name: compute_score
+    kwargs: {} # custom static arguments to be passed to the reward function
+
+comet:
+  enable: False
+  micro_batch_size: 64
+  model:
+    download_path: ~/models/Unbabel-wmt22-comet-da/checkpoints/model.ckpt
+    external_lib: ${actor_rollout_ref.model.external_lib}
+
 # custom reward function definition
 custom_reward_function:
 

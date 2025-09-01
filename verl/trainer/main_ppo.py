@@ -29,6 +29,10 @@ from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
 
+from functools import partial
+
+from collections.abc import Mapping
+
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
@@ -183,7 +187,12 @@ class TaskRunner:
             Role.Critic: global_pool_id,
         }
 
-        # We should adopt a multi-source reward function here:
+        if config.answer_extractor.enable:
+            from verl.workers.fsdp_workers import AnswerExtractorWorker
+            role_worker_mapping[Role.AnswerExtractor] = ray.remote(AnswerExtractorWorker)
+            mapping[Role.AnswerExtractor] = global_pool_id
+
+        # We should adopt a multi-source reward function here
         # - for rule-based rm, we directly call a reward score
         # - for model-based rm, we call a model
         # - for code related prompt, we send to a sandbox if there are test cases
@@ -203,21 +212,33 @@ class TaskRunner:
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
+        
+        if config.comet.enable:
+            from verl.workers.fsdp_workers import COMETWorker
+            role_worker_mapping[Role.COMETMetric] = ray.remote(COMETWorker)
+            mapping[Role.COMETMetric] = global_pool_id
 
-        # Load the reward manager for training and validation.
+        if config.reward_function.enable:
+            from verl.workers.fsdp_workers import RewardFunctionWorker
+            role_worker_mapping[Role.RewardFunction] = ray.remote(RewardFunctionWorker)
+            mapping[Role.RewardFunction] = global_pool_id
+
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
         )
         val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+            config, tokenizer, num_examine=3, **config.reward_model.get("reward_kwargs", {})
         )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        # Create training and validation datasets.
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
+        if len(config.data.val_files) > 0:
+            val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
+        else:
+            print('No validation files found, skipping validation.', flush=True)
+            val_dataset = None
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.

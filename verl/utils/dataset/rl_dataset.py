@@ -133,6 +133,17 @@ class RLHFDataset(Dataset):
             # read parquet files and cache
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             dataframes.append(dataframe)
+
+        # columns_set = set(dataframes[0].column_names)
+        # for dataframe in dataframes[1:]:
+        #     columns_set &= set(dataframe.column_names)
+        
+        # columns_to_select = list(columns_set)
+        # print("Selecting columns:", columns_to_select)
+        # dataframes = [df.select_columns(columns_to_select) for df in dataframes]
+
+        dataframes = _pad_dict_column(dataframes, "reward_model")
+
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         print(f"dataset len: {len(self.dataframe)}")
@@ -336,3 +347,47 @@ class RLHFDataset(Dataset):
             return state
 
         return self.__dict__.copy()
+
+
+def _pad_dict_column(datasets, column_name, fill_value=None):
+    """
+    Given a list of HuggingFace Datasets, pad the dictionaries in the specified column
+    so that all examples across all datasets have the same set of keys.
+
+    Args:
+        datasets (List[Dataset]): List of HuggingFace Dataset objects.
+        column_name (str): Name of the column containing dicts.
+        fill_value (Any, optional): Value to use for missing keys. Defaults to None.
+
+    Returns:
+        List[Dataset]: New list of Datasets with padded dicts in the specified column.
+    """
+    # Compute the union of all keys across all datasets
+    all_keys = set()
+    for ds in datasets:
+        # iterate through the column values
+        for record in ds[column_name]:
+            if isinstance(record, dict):
+                all_keys.update(record.keys())
+            else:
+                raise ValueError(f"Column '{column_name}' must contain dicts, found {type(record)}")
+
+    # Function to pad a single example
+    def _pad(example):
+        orig = example[column_name]
+        # Build a new dict with all keys
+        padded = {k: orig.get(k, fill_value) for k in all_keys}
+        return {column_name: padded}
+
+    # Apply padding to each dataset
+    padded_datasets = []
+    for ds in datasets:
+        padded = ds.map(
+            _pad,
+            batched=False,
+            remove_columns=[column_name],
+            keep_in_memory=True
+        )
+        padded_datasets.append(padded)
+
+    return padded_datasets

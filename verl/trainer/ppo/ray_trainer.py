@@ -61,7 +61,13 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
+<<<<<<< HEAD
 WorkerType = type[Worker]
+=======
+from typing import Callable
+
+WorkerType = Type[Worker]
+>>>>>>> main
 
 
 class Role(Enum):
@@ -76,6 +82,9 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    COMETMetric = 7
+    AnswerExtractor = 8
+    RewardFunction = 9
 
 
 @dataclass
@@ -353,13 +362,22 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_answer_extractor = Role.AnswerExtractor in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.use_comet = Role.COMETMetric in role_worker_mapping
+        self.use_rf = Role.RewardFunction in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
+<<<<<<< HEAD
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+=======
+        self.device_name = device_name
+        self.validation_generations_logger = ValidationGenerationsLogger()
+        self.do_val = val_dataset is not None
+>>>>>>> main
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
@@ -553,15 +571,30 @@ class RayPPOTrainer:
                 "validation gen temperature should be greater than 0 when enabling do_sample"
             )
 
+        # Check comet
+        if self.use_comet:
+            assert config.answer_extractor.enable, \
+                "COMET metric requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
+            
+        if self.use_rf:
+            assert config.answer_extractor.enable, \
+                "Reward function requires answer extractor to be enabled. Please set `answer_extractor.enable=True`."
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
         """
-        # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+        # -------------
+        # In the upstream version, this is uncommented, but Im not sure why since they
+        # create the dataset outside, and this just repeats the logic again.
+        # -------------
+        #
+        # # TODO: we have to make sure the batch size is divisible by the dp size
+        # from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 
+<<<<<<< HEAD
         if train_dataset is None:
             train_dataset = create_rl_dataset(
                 self.config.data.train_files, self.config.data, self.tokenizer, self.processor
@@ -570,14 +603,31 @@ class RayPPOTrainer:
             val_dataset = create_rl_dataset(
                 self.config.data.val_files, self.config.data, self.tokenizer, self.processor
             )
+=======
+        # if train_dataset is None:
+        #     train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
+        # if val_dataset is None:
+        #     val_dataset = create_rl_dataset(self.config.data.val_files, self.config.data, self.tokenizer, self.processor)
+>>>>>>> main
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
-        if train_sampler is None:
-            train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
-        if collate_fn is None:
-            from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+        # ------------
+        # In the upstream version, this is uncommented, but Im not sure why since they
+        # create the sampler outside, and this just repeats the logic again.
+        # ------------
+        #
+        # if train_sampler is None:
+        #     train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
+        
+        # ------------
+        # In the upstream version, this is uncommented, but Im not sure why since they
+        # create the collate_fn outside, and this just repeats the logic again.
+        # ------------
+        #
+        # if collate_fn is None:
+        #     from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
 
-            collate_fn = default_collate_fn
+        #     collate_fn = default_collate_fn
 
         num_workers = self.config.data["dataloader_num_workers"]
 
@@ -590,10 +640,26 @@ class RayPPOTrainer:
             sampler=train_sampler,
         )
 
-        val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
-        if val_batch_size is None:
-            val_batch_size = len(self.val_dataset)
+        if self.do_val:
+            val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
+            if val_batch_size is None:
+                val_batch_size = len(self.val_dataset)
 
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                # Validation datasets are sent to inference engines as a whole batch,
+                # which will schedule the memory themselves.
+                batch_size=len(self.val_dataset),
+                num_workers=8,
+                shuffle=False,
+                drop_last=False,
+                collate_fn=collate_fn)
+
+        assert len(self.train_dataloader) >= 1
+        if self.do_val:
+            assert len(
+                self.val_dataloader
+            ) == 1, "Validation dataloader must have a single batch, which inference engines will schedule the memory themselves."
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
@@ -699,32 +765,41 @@ class RayPPOTrainer:
             )
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
-                return {}
+            #if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
+            #    return {}
+
+            # pad to be divisible by dp_size
+            test_batch_padded, pad_size = pad_dataproto_to_divisor(test_batch, self.actor_rollout_wg.world_size)
 
             # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
+            input_ids = test_batch_padded.batch['input_ids']
             # TODO: Can we keep special tokens except for padding tokens?
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-            if "multi_modal_data" in test_batch.non_tensor_batch:
+            if "multi_modal_data" in test_batch_padded.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
-            if "raw_prompt" in test_batch.non_tensor_batch:
+            if "raw_prompt" in test_batch_padded.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
-            if "tools_kwargs" in test_batch.non_tensor_batch:
+            if "tools_kwargs" in test_batch_padded.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
+<<<<<<< HEAD
             if "interaction_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("interaction_kwargs")
             if "agent_name" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("agent_name")
             test_gen_batch = test_batch.pop(
+=======
+
+            test_gen_batch_padded = test_batch_padded.pop(
+>>>>>>> main
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
 
+<<<<<<< HEAD
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
@@ -732,9 +807,18 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
                 "global_steps": self.global_steps,
+=======
+            test_gen_batch_padded.meta_info = {
+                'eos_token_id': self.tokenizer.eos_token_id,
+                'pad_token_id': self.tokenizer.pad_token_id,
+                'recompute_log_prob': False,
+                'do_sample': self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
+                'validate': True,
+>>>>>>> main
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            print(f'test_gen_batch meta info: {test_gen_batch_padded.meta_info}')
 
+<<<<<<< HEAD
             # pad to be divisible by dp_size
             size_divisor = (
                 self.actor_rollout_wg.world_size
@@ -742,23 +826,53 @@ class RayPPOTrainer:
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+=======
+>>>>>>> main
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
+<<<<<<< HEAD
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
             print("validation generation end")
 
+=======
+>>>>>>> main
             # Store generated outputs
-            output_ids = test_output_gen_batch.batch["responses"]
+            output_ids = test_output_gen_batch_padded.batch['responses']
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
+<<<<<<< HEAD
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
+=======
+            test_batch_padded = test_batch_padded.union(test_output_gen_batch_padded)
+
+            if self.use_answer_extractor:
+                ae_output = self.answer_extractor_wg.extract_answers(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(ae_output)
+
+            if self.use_rm:
+                # we first compute reward model score
+                scores = self.rm_wg.compute_rm_score(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(scores)
+            
+            if self.use_comet:
+                comet_output = self.comet_wg.compute_comet_rm(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(comet_output)
+
+            if self.use_rf:
+                rf_output = self.rf_wg.compute_rf_scores(test_batch_padded)
+                test_batch_padded = test_batch_padded.union(rf_output)
+
+            # unpad
+            test_batch = unpad_dataproto(test_batch_padded, pad_size=pad_size)
+            print('validation generation end')
+>>>>>>> main
 
             # evaluate using reward_function
             result = self.val_reward_fn(test_batch, return_dict=True)
@@ -864,12 +978,33 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
+        # create answer extractor if needed
+        if self.use_answer_extractor:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AnswerExtractor)
+            ae_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.AnswerExtractor],
+                config=self.config.answer_extractor,
+            )
+            self.resource_pool_to_cls[resource_pool]['answer_extractor'] = ae_cls
+
         # create a reward model if reward_fn is None
         if self.use_rm:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
+
+         # create comet is needed
+        if self.use_comet:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.COMETMetric)
+            comet_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.COMETMetric], config=self.config.comet)
+            self.resource_pool_to_cls[resource_pool]['comet'] = comet_cls
+
+        # create reward function if needed
+        if self.use_rf:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardFunction)
+            rf_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardFunction], config=self.config.reward_function)
+            self.resource_pool_to_cls[resource_pool]['rf'] = rf_cls
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -908,9 +1043,21 @@ class RayPPOTrainer:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
 
+        if self.use_answer_extractor:
+            self.answer_extractor_wg = all_wg['answer_extractor']
+            self.answer_extractor_wg.init()
+
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+
+        if self.use_comet:
+            self.comet_wg = all_wg['comet']
+            self.comet_wg.init_model()
+
+        if self.use_rf:
+            self.rf_wg = all_wg['rf']
+            self.rf_wg.init()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg["actor_rollout"]
@@ -1106,7 +1253,7 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.do_val and self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -1212,11 +1359,31 @@ class RayPPOTrainer:
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
+<<<<<<< HEAD
                     with marked_timer("reward", timing_raw, color="yellow"):
+=======
+                    # Extract answers
+                    if self.use_answer_extractor:
+                        with _timer('answer_extract', timing_raw):
+                            ae_output = self.answer_extractor_wg.extract_answers(batch)
+                            batch = batch.union(ae_output)
+
+                    with _timer("reward", timing_raw):
+>>>>>>> main
                         # compute reward model score
                         if self.use_rm:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
+
+                        if self.use_comet:
+                            comet_output = self.comet_wg.compute_comet_rm(batch)
+                            batch = batch.union(comet_output)
+                            metrics.update(comet_output.meta_info["comet_metrics"])
+
+                        if self.use_rf:
+                            rf_output = self.rf_wg.compute_rf_scores(batch)
+                            batch = batch.union(rf_output)
+                            metrics.update(rf_output.meta_info["rf_metrics"])
 
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
@@ -1346,12 +1513,18 @@ class RayPPOTrainer:
                             )
 
                     # validate
+<<<<<<< HEAD
                     if (
                         self.val_reward_fn is not None
                         and self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
                     ):
                         with marked_timer("testing", timing_raw, color="green"):
+=======
+                    if self.do_val and self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
+                        (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
+                        with _timer('testing', timing_raw):
+>>>>>>> main
                             val_metrics: dict = self._validate()
                             if is_last_step:
                                 last_val_metrics = val_metrics
